@@ -3,13 +3,13 @@ Some common functions and data sets.
 
 Functions:
 
-buildDTtable:
-auther:runrun.wei
-update:lulu.zhang
+buildDTtable:\n
+auther:runrun.wei\n
+update:lulu.zhang\n
 description:to build a data.table which can be download.
 
-layout_ggplotly:
-auther:unknown
+layout_ggplotly:\n
+auther:unknown\n
 description:to make your ggplot more beautiful. Just space between axis label and title.
 
 Datasets:
