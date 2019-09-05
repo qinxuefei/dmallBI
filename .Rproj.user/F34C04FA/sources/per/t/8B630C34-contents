@@ -1,0 +1,6 @@
+
+library(readxl)
+
+vender_info <- read_excel("~/dmallBI/data-raw/vender_info.xlsx")
+
+devtools::use_data(vender_info, overwrite = T)

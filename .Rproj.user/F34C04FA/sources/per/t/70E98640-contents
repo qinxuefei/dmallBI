@@ -1,0 +1,575 @@
+---
+title: "履约运营日报"
+date: "`r Sys.Date()-1`"
+author: "xuefei.qin"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = '~/Rworkfile/daily_report/')
+options(scipen = 15) 
+## Environment settings 
+library(dplyr) 
+# library(stringr) 
+library(data.table) 
+library(ggplot2)
+# library(scales)
+library(plotly)
+library(reshape)
+library(tidyr)
+library(lubridate)
+library(readxl)
+library(Hmisc)
+library(DT)
+library(odbc)
+library(stringr)
+
+conn = dbConnect(odbc(), 'hive')
+
+data.source <- 1
+
+# source('/home/xuefeiqin/Rworkfile/baseconn.R')
+```
+
+```{r}
+library(openxlsx)
+# Create a blank workbook
+OUT <- createWorkbook()
+
+# Add some sheets to the workbook
+addWorksheet(OUT, "整体的数据")
+addWorksheet(OUT, "整体门店的数据")
+addWorksheet(OUT, "履约及时率低于90%的数据")
+addWorksheet(OUT, "拣货及时率低于90%的数据")
+addWorksheet(OUT, "配送及时率低于90%且履约及时率低于90%的数据")
+# addWorksheet(OUT, "未及时履约订单明细")
+
+```
+
+
+```{r}
+#获取原始数据
+#报告中的商家
+dt <- gsub('-', '', Sys.Date()-3)
+report_date <- gsub('-', '', Sys.Date()-1)
+report_date1 <- Sys.Date()-1
+
+if (data.source == 1) {
+    
+vender_id <- c(1,2,56,60,64,66,67,72,73,74,75,76,77,79,80,82,83,85,86,100,97,103,69,138,134,102, 141,148,182,147)
+
+# dt <- gsub('-', '', Sys.Date()-3)
+# report_date <- gsub('-', '', Sys.Date()-1)
+# report_date1 <- Sys.Date()-1
+
+sql1 <- sprintf("SELECT *
+                from ana_report.performance_report
+                where dt >= '%s'
+                and report_time = '%s'
+                and vender_id in (%s)", dt, report_date, paste(vender_id, collapse = ','))
+# writeLines(sql1)
+
+report_data <- try(dbGetQuery(conn, sql1))
+
+#简化列名
+colnames(report_data) <- gsub('performance_report.', '', colnames(report_data))
+
+fwrite(report_data, file = 'report_data.csv')
+# 配送及时率
+sql2 <- sprintf("SELECT a.order_id,
+                       a.vender_id,
+                       a.vender_name,
+                       c.store_management_area_name,
+                       c.store_sap_id,
+                       c.store_name,
+                       a.last_shipment_end_time,
+                       a.last_shipment_start_time,
+                       b.waybill_last_allot_time,
+                       a.order_hurl_time,
+                       a.report_time,
+                       if(a.vender_id=1
+                          OR a.vender_id=2
+                          OR a.vender_id=85, (unix_timestamp(a.last_shipment_end_time) - unix_timestamp(a.last_shipment_start_time))/60*0.6,60) AS delivery_ontime_kpi,
+                       if(b.waybill_last_allot_time IS NULL,1,0) AS shifou_fenpei,
+                       CASE t.manage_type_name
+                           WHEN '多点配送' THEN '多点配送'
+                           WHEN '众包' THEN '众包'
+                           WHEN '第三方' THEN t.carrier_name
+                           ELSE t.carrier_name_new
+                       END AS carrier_name
+                FROM ana_report.performance_delivery_detail AS a
+                LEFT JOIN dwd_data.dwd_order_online_view AS b ON b.order_id=a.order_id
+                AND b.dt BETWEEN regexp_replace(date_sub(current_date(),7),'-','') AND regexp_replace(date_sub(current_date(),1),'-','')
+                LEFT JOIN dm_data.dim_store c ON a.store_id = c.store_id
+                LEFT JOIN
+                  (SELECT a.carrier_id AS carrier_id,
+                          a.carrier_name as carrier_name,
+                          CASE a.delivery_id
+                              WHEN -7 THEN '达达配送'
+                              WHEN -8 THEN '如风达'
+                              WHEN -10 THEN '美团配送'
+                              ELSE a.carrier_name
+                          END AS carrier_name_new,
+                          a.order_id AS order_id,
+                          a.manage_type_id AS manage_type_id,
+                          a.manage_type_name AS manage_type_name
+                   FROM dmall_delivery.waybill_delivery_report AS a
+                   WHERE a.dt>= regexp_replace(date_sub(current_date(),7),'-','')
+                   UNION ALL SELECT b.carrier_id AS carrier_id,
+                                     b.carrier_name as carrier_name,   
+                                    CASE b.delivery_id
+                                        WHEN -7 THEN '达达配送'
+                                        WHEN -8 THEN '如风达'
+                                        WHEN -10 THEN '美团配送'
+                                        ELSE b.carrier_name
+                                    END AS carrier_name_new,
+                                    b.order_id AS order_id,
+                                    b.manage_type_id AS manage_type_id,
+                                    b.manage_type_name AS manage_type_name
+                   FROM dmall_dms_delivery.dms_delivery_report AS b
+                   WHERE b.dt>= regexp_replace(date_sub(current_date(),7),'-','') ) t ON a.order_id = t.order_id
+                WHERE a.dt BETWEEN regexp_replace(date_sub(current_date(),7),'-','') AND regexp_replace(date_sub(current_date(),1),'-','')
+                  AND b.shipment_type = 1
+                  AND to_date(a.last_shipment_end_time) = date_sub(current_date(),1)
+                  AND c.store_test_flag <> 2
+                  AND b.vender_id in (%s)
+                  AND a.sale_type IN (1, 2)",
+   paste(vender_id, collapse = ','))
+
+# writeLines(sql2)
+delivery_data <-  try(dbGetQuery(conn, sql2))
+
+colnames(delivery_data) <- gsub('a\\.|b\\.|c\\.', '', colnames(delivery_data))
+
+fwrite(delivery_data, file = 'delivery_data.csv')
+#未及时履约订单
+sql3 <- sprintf("SELECT o.order_id,
+               coalesce(o.parent_id, o.order_id) AS parent_id,
+               o.order_complete_time,
+               o.vender_id,
+               s.vender_name,
+               o.store_id,
+               o.store_name,
+               o.store_sap_id,
+               o.shipment_start_time,
+               o.shipment_end_time,
+               o.reshipment_last_start_time,
+               o.reshipment_last_end_time,
+               o.pick_last_allot_time,
+               o.pick_confirm_time,
+               o.pick_start_time,
+               o.pick_complete_time,
+               o.pack_time,
+               o.waybill_receive_time,
+               o.waybill_first_allot_time,
+               o.waybill_first_confirm_time,
+               o.waybill_last_allot_time,
+               o.waybill_last_confirm_time,
+               o.waybill_last_delivery_id,
+               o.waybill_last_delivery_name,
+               o.carrier_id,
+               o.carrier_name,
+               o.carrier_type,
+               a.order_id as work_order_id,
+               a.work_time,
+               c.score,
+               p.order_id AS lack_order_id,
+               b.order_id AS refund_order_id,
+               b.create_time
+        FROM dwd_data.dwd_order_online_view AS o
+        INNER JOIN dm_data.dim_store AS s ON s.store_id = o.store_id
+        LEFT JOIN ana_report.performance_workorder_detail AS a ON a.order_id = o.order_id
+        AND a.work_type in (159, 352, 326)
+        AND a.dt >= regexp_replace(date_sub(current_date(),10),'-','')
+        LEFT JOIN dmall_mongo.rate_order_delivery AS c ON c.out_biz_id = o.order_id
+        AND c.dt >= regexp_replace(date_sub(current_date(), 10),'-','')
+        LEFT JOIN dmall_wms_lack.wms_lack_ware AS p ON p.order_id = o.order_id
+        AND p.dt >= regexp_replace(date_sub(current_date(), 10),'-','')
+        AND p.yn = 1
+        LEFT JOIN dmall_refund.as_applyment AS b ON b.order_id=o.order_id
+        AND b.dt>= regexp_replace(date_sub(current_date(),10),'-','')
+        AND b.yn = 1
+        WHERE o.shipment_type = 1
+          and o.sale_type in (1,2)
+          and o.vender_id in (%s)
+          AND o.order_status <> 128
+          and s.store_test_flag <> 2
+          AND coalesce(o.reshipment_last_start_time, o.shipment_start_time) >= '%s 00:00:00'
+          and coalesce(o.reshipment_last_end_time, o.shipment_end_time) <= '%s 23:59:59'", 
+        paste(vender_id, collapse = ','), report_date1, report_date1)
+# writeLines(sql3)
+# perfect_data <- dbGetQuery(conn, sql3)
+# 
+# colnames(perfect_data) <- gsub('s\\.|b\\.|o\\.|a\\.|c\\.|p\\.', '', colnames(perfect_data))
+} else {
+    
+    report_data <- fread('report_data.csv', na.strings = '')
+    delivery_data <- fread('delivery_data.csv', na.strings = '')
+    
+}
+
+vender_area <- read_excel(path = 'vender_quyu.xlsx')
+
+```
+
+
+
+Dear All:   
+ `r Sys.Date()-1`各商家履约运营日报，请查收。
+ 
+**一、各商家履约指标达成情况（按照妥投单量进行排序降序）**
+ 
+```{r}
+#配送及时率
+#到商家的
+delivery_rate <- delivery_data %>%
+    filter(shifou_fenpei == 0) %>%
+    mutate(order_hurl_time = ymd_hms(order_hurl_time),
+           waybill_last_allot_time = ymd_hms(waybill_last_allot_time),
+           last_shipment_start_time = ymd_hms(last_shipment_start_time),
+           last_shipment_end_time = ymd_hms(last_shipment_end_time),
+           period_time = ifelse(waybill_last_allot_time < last_shipment_start_time,
+                                difftime(order_hurl_time,last_shipment_start_time,units = 'mins'),
+                                difftime(order_hurl_time,waybill_last_allot_time, units = 'mins')),
+           mark = ifelse(period_time <= delivery_ontime_kpi, '及时', '不及时')) %>%
+    group_by(vender_name, mark) %>%
+    summarise(order_cnt = n_distinct(order_id)) %>%
+    group_by(vender_name) %>%
+    mutate(total_order = sum(order_cnt)) %>%
+    ungroup() %>%
+    mutate(delivery_ontime_rate = order_cnt/total_order) %>%
+    filter(mark == '及时')
+
+# 到门店的
+delivery_rate_store <- delivery_data %>%
+  filter(shifou_fenpei == 0) %>%
+    mutate(order_hurl_time = ymd_hms(order_hurl_time),
+           waybill_last_allot_time = ymd_hms(waybill_last_allot_time),
+           last_shipment_start_time = ymd_hms(last_shipment_start_time),
+           last_shipment_end_time = ymd_hms(last_shipment_end_time),
+           period_time = ifelse(waybill_last_allot_time < last_shipment_start_time,
+                                difftime(order_hurl_time,last_shipment_start_time,units = 'mins'),
+                                difftime(order_hurl_time,waybill_last_allot_time, units = 'mins')),
+           mark = ifelse(period_time <= delivery_ontime_kpi , '及时', '不及时')) %>%
+    group_by(vender_name,store_sap_id, mark) %>%
+    summarise(order_cnt = n_distinct(order_id)) %>%
+    group_by(vender_name, store_sap_id) %>%
+    mutate(total_order = sum(order_cnt)) %>%
+    ungroup() %>%
+    mutate(delivery_ontime_rate = order_cnt/total_order) %>%
+    filter(mark == '及时')
+
+
+carrier_name <- delivery_data %>%
+  filter(shifou_fenpei == 0) %>%
+    mutate(order_hurl_time = ymd_hms(order_hurl_time),
+           waybill_last_allot_time = ymd_hms(waybill_last_allot_time),
+           last_shipment_start_time = ymd_hms(last_shipment_start_time),
+           last_shipment_end_time = ymd_hms(last_shipment_end_time),
+           period_time = ifelse(waybill_last_allot_time < last_shipment_start_time,
+                                difftime(order_hurl_time,last_shipment_start_time,units = 'mins'),
+                                difftime(order_hurl_time,waybill_last_allot_time, units = 'mins')),
+           mark = ifelse(period_time <= delivery_ontime_kpi&shifou_fenpei == 0 , '及时', '不及时')) %>%
+    filter(mark == '不及时') %>%
+    select(vender_id, vender_name, store_sap_id, carrier_name) %>%
+    unique() %>%
+    group_by(vender_id, vender_name, store_sap_id) %>%
+    mutate(carrier_name = paste(carrier_name, collapse = ',')) %>%
+    unique()
+    
+    
+#其他所有指标,加上配送及时率
+report_data_vender <- report_data %>%
+    filter(sale_type %in% c(1,2)) %>%
+    group_by(vender_name) %>%
+    summarise(complete_order_cnt = sum(hurlorder_num),
+              delivery_rate = ifelse(is.na(sum(delivery_numerator)/sum(delivery_denominator)), 
+                                     1, sum(delivery_numerator)/sum(delivery_denominator)),
+              pickorder_rate = ifelse(is.na(sum(pickorder_numerator)/sum(pickorder_denominator)),
+                                      1,sum(pickorder_numerator)/sum(pickorder_denominator)),
+              redelivery_rate = ifelse(is.na(sum(redelivery_numerator)/sum(redelivery_denominator)),
+                                       0,sum(redelivery_numerator)/sum(redelivery_denominator)),
+              refund_rate = ifelse(is.na(sum(refund_numerator)/sum(refund_denominator)),
+                                   0, sum(refund_numerator)/sum(refund_denominator)),
+              workorder_rate = ifelse(is.na(sum(workorder_numerator)/sum(workorder_denominator)),
+                                      0,sum(workorder_numerator)/sum(workorder_denominator)),
+              lackorder_rate = ifelse(is.na(sum(lackorder_numerator)/sum(lackorder_denominator)), 
+                                      0, sum(lackorder_numerator)/sum(lackorder_denominator)),
+              cancel_rate = ifelse(is.na(sum(cancel_numerator)/sum(cancel_denominator)),
+                                   0,sum(cancel_numerator)/sum(cancel_denominator)),
+              selforder_rate = ifelse(is.na(sum(selforder_numerator)/sum(selforder_denominator)),
+                                      0,sum(selforder_numerator)/sum(selforder_denominator)),
+              sellout_rate = ifelse(is.na(sum(sellout_numerator)/sum(sellout_denominator)),
+                                    0,sum(sellout_numerator)/sum(sellout_denominator))) %>%
+    ungroup() %>%
+    left_join(delivery_rate %>%
+                  select(vender_name, delivery_ontime_rate), by = 'vender_name') %>%
+    left_join (vender_area, by = c('vender_name' = '商家')) %>%
+    select(区域,
+           vender_name, 
+           complete_order_cnt, 
+           delivery_rate,
+           pickorder_rate,
+           delivery_ontime_rate,
+           redelivery_rate,
+           refund_rate,
+           workorder_rate,
+           lackorder_rate,
+           cancel_rate,
+           selforder_rate,
+           sellout_rate) %>%
+    arrange(desc(complete_order_cnt))
+
+writeData(OUT, sheet = "整体的数据", x = report_data_vender)
+
+report_data_vender_index <- apply(report_data_vender[,4:13], 2, function(x) sprintf('%.2f%%', x*100) ) %>%
+    as.data.frame()
+report_data_vender_index[report_data_vender_index == 'NaN%'] <- NA
+report_data_vender_vender <- report_data_vender[,1:3]
+report_data_vender_print <- cbind(report_data_vender_vender, report_data_vender_index)
+
+colnames(report_data_vender_print) <-  c('区域', '商家','妥投单量','履约及时率','拣货及时率','配送及时率(新)',
+                                        '配送再投率','售后退款率','客诉率','缺货率',
+                                        '取消率','自提及时率','全天无货率')
+knitr::kable(report_data_vender_print) 
+```
+
+备注： 
+配送及时率（新）：配送及时单量，前提是订单进入配送环节，如订单没有分配时间，既不视为及时也不视为超时；  
+（1）配送考核时长：北京物美、华东物美、天津物美按照履约时段的60%作为配送考核，其他商家按照60分钟作为配送考核；  
+（2）配送及时：配送时长≤配送考核时长；  
+（3）若订单在履约开始时间之前进行分配，配送及时：妥投时间-履约开始时间≤配送考核时长。 
+
+<!-- # ```{r} -->
+<!-- # perfect_data1 <- perfect_data %>% -->
+<!-- #     #履约及时率计算 -->
+<!-- #     mutate(true_shipment_start_time = coalesce(reshipment_last_start_time, shipment_start_time), -->
+<!-- #            true_shipment_end_time = coalesce(reshipment_last_end_time, shipment_end_time), -->
+<!-- #            complete_ontime = ifelse(is.na(order_complete_time), '不及时', -->
+<!-- #                ifelse(order_complete_time <= true_shipment_end_time, '及时', '不及时')), -->
+<!-- #            #配送及时率计算 -->
+<!-- #            delivery_ontime_kpi = ifelse(vender_id %in% c(1, 2, 85), -->
+<!-- #                (ymd_hms(true_shipment_end_time)-ymd_hms(true_shipment_start_time))/60*0.6,60), -->
+<!-- #            order_complete_time = ymd_hms(order_complete_time), -->
+<!-- #            waybill_last_allot_time = ymd_hms(waybill_last_allot_time), -->
+<!-- #            true_shipment_start_time = ymd_hms(true_shipment_start_time), -->
+<!-- #            true_shipment_end_time = ymd_hms(true_shipment_end_time), -->
+<!-- #            period_time = ifelse(waybill_last_allot_time < true_shipment_start_time, -->
+<!-- #                                 (order_complete_time - true_shipment_start_time)/60, -->
+<!-- #                                 (order_complete_time - waybill_last_allot_time)/60), -->
+<!-- #            delivery_ontime = ifelse(is.na(order_complete_time), '不及时', -->
+<!-- #                                     ifelse(is.na(waybill_last_allot_time), '及时',  -->
+<!-- #                          ifelse(period_time <= delivery_ontime_kpi, '及时', '不及时'))), -->
+<!-- #            #拣货及时率计算 -->
+<!-- #            pick_perion_time = (ymd_hms(shipment_end_time) - ymd_hms(pack_time))/60, -->
+<!-- #            pick_ontime = ifelse(is.na(pack_time), '不及时', -->
+<!-- #                                        ifelse(is.na(period_time), '及时',  -->
+<!-- #                                               ifelse(pick_perion_time > period_time, '及时', '不及时')))) %>% -->
+<!-- #     distinct(order_id, .keep_all = T) -->
+<!-- #  -->
+<!-- # #未及时履约订单明细，写出 -->
+<!-- # out1 <- perfect_data1 %>% -->
+<!-- #     filter(complete_ontime == '不及时')  -->
+<!-- # writeData(OUT, sheet = "未及时履约订单明细", x = out1) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # te <- perfect_data1 %>% -->
+<!-- #     filter(is.na(pick_ontime)) -->
+<!-- #  -->
+<!-- # #整体未及时履约情况 -->
+<!-- # perfect_data2 <- perfect_data1 %>% -->
+<!-- #     filter(complete_ontime == '不及时') %>% -->
+<!-- #     group_by(delivery_ontime, pick_ontime) %>% -->
+<!-- #     summarise(cnt = n_distinct(order_id)) %>% -->
+<!-- #     ungroup() %>% -->
+<!-- #     mutate(total = sum(cnt), -->
+<!-- #            rate = cnt/total, -->
+<!-- #            name = case_when(delivery_ontime == '及时'&pick_ontime == '及时' ~ '其他原因', -->
+<!-- #                             delivery_ontime == '及时'&pick_ontime == '不及时' ~ '拣货原因', -->
+<!-- #                             delivery_ontime == '不及时'&pick_ontime == '及时' ~ '配送原因', -->
+<!-- #                             delivery_ontime == '不及时'&pick_ontime == '不及时' ~ '拣配原因' -->
+<!-- #                             )) -->
+<!-- #    -->
+<!-- # ggplot(perfect_data2, aes(x = '', y = rate, fill = name)) +  -->
+<!-- #     geom_bar(stat = 'identity', width = 1) +  -->
+<!-- #     coord_polar(theta = 'y') + -->
+<!-- #     scale_fill_brewer(palette = "Dark2") + -->
+<!-- #     theme_void() + -->
+<!-- #     geom_text(aes(label =paste(name, paste(cnt, sprintf('%.1f%%', rate*100), sep = ','),sep = "\n")),  -->
+<!-- #               position = position_stack(vjust = 0.5), -->
+<!-- #               size = 3) -->
+<!-- #      -->
+<!-- # ``` -->
+
+**二、异常门店**
+
+```{r}
+#到门店的
+report_data_store <- report_data %>%
+    group_by(report_time, vender_name, manager_area_name,store_sap_id,store_name) %>%
+    summarise(complete_order_cnt = sum(hurlorder_num),
+              delivery_rate = sum(delivery_numerator)/sum(delivery_denominator),
+              pickorder_rate = sum(pickorder_numerator)/sum(pickorder_denominator),
+              redelivery_rate = sum(redelivery_numerator)/sum(redelivery_denominator),
+              refund_rate = sum(refund_numerator)/sum(refund_denominator),
+              workorder_rate = sum(workorder_numerator)/sum(workorder_denominator),
+              lackorder_rate = sum(lackorder_numerator)/sum(lackorder_denominator),
+              cancel_rate = sum(cancel_numerator)/sum(cancel_denominator),
+              selforder_rate = sum(selforder_numerator)/sum(selforder_denominator),
+              sellout_rate = sum(sellout_numerator)/sum(sellout_denominator)) %>%
+    ungroup() %>%
+    left_join(delivery_rate_store %>%
+                  select(vender_name, store_sap_id,  delivery_ontime_rate), by = c('vender_name', 'store_sap_id')) %>%
+    select(report_time, 
+           vender_name, 
+           manager_area_name,
+           store_sap_id,
+           store_name, 
+           complete_order_cnt, 
+           delivery_rate,
+           pickorder_rate,
+           delivery_ontime_rate,
+           redelivery_rate,
+           refund_rate,
+           workorder_rate,
+           lackorder_rate,
+           cancel_rate,
+           selforder_rate,
+           sellout_rate)
+
+writeData(OUT, sheet = "整体门店的数据", x = report_data_store)
+
+##配送及时率低于90%且履约及时率低于90%的
+delivery_rate_store1 <- report_data_store %>%
+    filter(delivery_ontime_rate < 0.9,
+           delivery_rate < 0.9) %>%
+    left_join(carrier_name, by = c( 'vender_name', 'store_sap_id')) %>%
+    select(report_time, vender_name, manager_area_name, store_sap_id,
+           store_name, complete_order_cnt, delivery_ontime_rate, delivery_rate, carrier_name) %>%
+     mutate('原因分析' = '',
+           '整改方案' = '',
+           '完成时间' = '')
+  
+writeData(OUT, sheet = "配送及时率低于90%且履约及时率低于90%的数据", x = delivery_rate_store1)  
+
+# 履约及时率低于90%的门店
+report_data_store_1 <- report_data_store %>%
+    filter(delivery_rate < 0.9) %>%
+    select(report_time, vender_name, manager_area_name,store_sap_id,
+               store_name, complete_order_cnt, delivery_rate) %>%
+    mutate('原因分析' = '',
+           '整改方案' = '',
+           '完成时间' = '')
+
+writeData(OUT, sheet = "履约及时率低于90%的数据", x = report_data_store_1)
+
+
+# 拣货及时率低于90%的门店
+report_data_store_2 <- report_data_store %>%
+    filter(pickorder_rate < 0.9) %>%
+    select(report_time, vender_name, manager_area_name,store_sap_id,
+               store_name, complete_order_cnt, pickorder_rate) %>%
+    mutate('原因分析' = '',
+           '整改方案' = '',
+           '完成时间' = '')
+
+writeData(OUT, sheet = "拣货及时率低于90%的数据", x = report_data_store_2)
+
+filename <- paste(report_date, 'daily_report.xlsx')
+
+# if (file.exists(filename)) {
+# 
+#     file.remove(filename)
+# 
+# }
+
+saveWorkbook(OUT, filename)
+
+focus_vender <- unique(union(report_data_store_1$vender_name, report_data_store_2$vender_name), delivery_rate_store1$vender_name)
+
+left_vender <- setdiff(report_data$vender_name, focus_vender)
+
+```
+
+ **以下商超履约、拣货、配送及时率无低于90%的门店:`r left_vender` **
+ 
+ **请各位负责人重点关注履约及时率、拣货及时率、配送及时率低于90%的门店，并在今天16:00回复原因及改善方案。 **  
+ 
+```{r , comment= ''}
+for (i in 1:length(focus_vender)) {
+   
+    data1 <- report_data_store_1 %>%
+        filter(vender_name == focus_vender[i]) %>%
+        select(report_time, vender_name, manager_area_name,store_sap_id,
+               store_name, complete_order_cnt, delivery_rate) %>%
+        filter(!str_detect(store_name, '拼团')) %>%
+        mutate(delivery_rate = sprintf('%.2f%%', delivery_rate*100))
+    
+    colnames(data1) <- c('日期','商家','管理区域','SAP店号','门店',
+                         '妥投订单','履约及时率')
+        
+    data2 <-  report_data_store_2 %>%
+        filter(vender_name == focus_vender[i]) %>%
+        select(report_time, vender_name, manager_area_name,store_sap_id,
+               store_name, complete_order_cnt, pickorder_rate) %>%
+        filter(!str_detect(store_name, '拼团')) %>%
+        mutate(pickorder_rate = sprintf('%.2f%%', pickorder_rate*100))
+    colnames(data2) <- c('日期','商家','管理区域','SAP店号','门店',
+                         '妥投订单', '拣货及时率')
+    
+    data3 <- delivery_rate_store1 %>%
+        filter(vender_name == focus_vender[i]) %>%
+        mutate(delivery_ontime_rate = sprintf('%.2f%%', delivery_ontime_rate*100),
+               delivery_rate = sprintf('%.2f%%', delivery_rate * 100)) %>%
+        filter(!str_detect(store_name, '拼团')) %>%
+        select(report_time, vender_name, manager_area_name, store_sap_id,
+           store_name, complete_order_cnt, delivery_ontime_rate, delivery_rate,
+           carrier_name) %>%
+        arrange(desc(delivery_ontime_rate)) %>%
+        head(5)
+    
+    colnames(data3) <- c('日期','商家','管理区域','SAP店号','门店',
+                         '妥投订单', '配送及时率', '妥投及时率','承运商')
+        
+    
+    if (any(nrow(data1)>0, nrow(data2) >0, nrow(data3) >0)) {
+        
+        writeLines(focus_vender[i])
+    }
+    
+    if (nrow(data1) >0) {
+        print(knitr::kable(data1, caption = '履约及时率未达90%门店，请重点关注'))
+    }
+    
+    if (nrow(data2) >0) {
+        print(knitr::kable(data2, caption =  '拣货及时率未达90%门店，请重点关注')) 
+            
+        writeLines(' ')
+    }
+    
+    if (nrow(data3) >0) {
+        print(knitr::kable(data3, caption =  '配送及时率未达90%门店，请重点关注')) 
+        writeLines(' ')
+    }
+}
+
+```
+
+**三、各商家KPI目标值**
+ 
+```{r}
+target <- read_excel(path = 'target.xlsx') 
+
+target_index <- apply(target[,2:11],2, function(x) sprintf('%.2f%%',x*100) ) %>%
+    as.data.frame()
+target_index[target_index == 'NA%'] <- NA
+target_vender <- target[,1] 
+target_print <- cbind(target_vender, target_index)
+knitr::kable(target_print)
+
+```
+
+ 
+ 
+ 
